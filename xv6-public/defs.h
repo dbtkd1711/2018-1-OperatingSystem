@@ -33,6 +33,8 @@ void            fileinit(void);
 int             fileread(struct file*, char*, int n);
 int             filestat(struct file*, struct stat*);
 int             filewrite(struct file*, char*, int n);
+int             filepread(struct file*, char*, int n, int off);
+int             filepwrite(struct file*, char*, int n, int off);
 
 // fs.c
 void            readsb(int dev, struct superblock *sb);
@@ -121,6 +123,9 @@ int             wait(void);
 void            wakeup(void*);
 void            yield(void);
 int             set_cpu_share(int);
+int             thread_create(thread_t * thread, void * (*start_routine)(void*), void * arg);
+void            thread_exit(void * retval);
+int             thread_join(thread_t thread, void ** retval);
 
 // swtch.S
 void            swtch(struct context**, struct context*);

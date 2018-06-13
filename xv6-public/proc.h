@@ -13,10 +13,12 @@ struct cpu {
 extern struct cpu cpus[NCPU];
 extern int ncpu;
 
-extern uint boosting_ticks;  // Ticks for priority boosting
-extern int MLFQ_pass;
-extern int MLFQ_stride;
-extern int stride_pass;  // Sum of all stride mode processes' tickets / Different from proc's pass
+int tid_alloc[NPROC];  // Array for tid allocation
+
+uint boosting_ticks;  // Ticks for priority boosting
+double MLFQ_pass;
+double MLFQ_stride;
+double stride_pass;  // Sum of all stride mode processes' tickets / Different from proc's pass
 
 //PAGEBREAK: 17
 // Saved registers for kernel context switches.
@@ -42,11 +44,13 @@ enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 // Per-process state
 struct proc {
   uint sz;                     // Size of process memory (bytes)
+  uint usz;
   pde_t* pgdir;                // Page table
   char *kstack;                // Bottom of kernel stack for this process
   enum procstate state;        // Process state
   int pid;                     // Process ID
   struct proc *parent;         // Parent process
+  struct proc *mthread;        // mthread : process which called thread_create()
   struct trapframe *tf;        // Trap frame for current syscall
   struct context *context;     // swtch() here to run process
   void *chan;                  // If non-zero, sleeping on chan
@@ -57,11 +61,16 @@ struct proc {
 
   int mlfq_mode;               // 1 : mlfq, 0 : stride
   int prior_level;             // 0~2 : mlfq, -1 : stride
-  uint quantum;            // For checking time quantum
+  uint quantum;                // For checking time quantum
   uint allotment;              // For checking time allotment
-  int tickets;                 // Represent cpu_share, 0 for mlfq_mode processes
-  int stride;                  // stride = 10,000 / tickets, 0 for mlfq_mode processes
-  int pass;                    // 0 for mlfq_mode processes
+  int total_tickets;                 // Represent cpu_share, 0 for mlfq_mode processes
+  double tickets;
+  double stride;                  // stride = 10,000 / tickets, 0 for mlfq_mode processes
+  double pass;                    // 0 for mlfq_mode processes
+  int is_thread;               // 0 = mthread, 1 = wthread
+  thread_t tid;                // 0 for mthreads
+  int num_thread;           // number of wthread that mthread has / o for wthread
+  int ret_val;                 // ret_val used in thread_exit(), thread_join()
 };
 
 // Process memory is laid out contiguously, low addresses first:

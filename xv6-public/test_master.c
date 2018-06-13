@@ -7,7 +7,7 @@
 #include "user.h"
 
 // Number of child programs
-#define CNT_CHILD           8
+#define CNT_CHILD           4
 
 // Name of child test program that tests Stride scheduler
 #define NAME_CHILD_STRIDE   "test_stride"

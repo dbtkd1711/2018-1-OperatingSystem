@@ -4,6 +4,7 @@
 ./mp.c
 ./test_stride.c
 ./sh.c
+./threadtest.c
 ./usertests.c
 ./kalloc.c
 ./syscall.h
@@ -50,6 +51,7 @@
 ./file.h
 ./entryother.S
 ./ulib.c
+./hugefiletest.c
 ./date.h
 ./user.h
 ./uart.c

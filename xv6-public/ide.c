@@ -153,7 +153,6 @@ iderw(struct buf *b)
   for(pp=&idequeue; *pp; pp=&(*pp)->qnext)  //DOC:insert-queue
     ;
   *pp = b;
-
   // Start disk if necessary.
   if(idequeue == b)
     idestart(b);

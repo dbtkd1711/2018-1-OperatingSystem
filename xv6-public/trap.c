@@ -8,35 +8,35 @@
 #include "traps.h"
 #include "spinlock.h"
 
+extern struct {
+    struct spinlock lock;
+    struct proc proc[NPROC];
+} ptable;
 // Interrupt descriptor table (shared by all CPUs).
 struct gatedesc idt[256];
 extern uint vectors[];  // in vectors.S: array of 256 entry pointers
 struct spinlock tickslock;
 uint ticks;
 uint boosting_ticks;
-int MLFQ_tickets;
-int MLFQ_pass;
-int MLFQ_stride;
-int stride_pass;
+extern double MLFQ_tickets;
+extern double MLFQ_pass;
+extern double MLFQ_stride;
+extern double stride_pass;
 
 void
 tvinit(void)
 {
     int i;
-
     for(i = 0; i < 256; i++)
     SETGATE(idt[i], 0, SEG_KCODE<<3, vectors[i], 0);
     SETGATE(idt[T_SYSCALL], 1, SEG_KCODE<<3, vectors[T_SYSCALL], DPL_USER);
-
     initlock(&tickslock, "time");
 }
-
 void
 idtinit(void)
 {
     lidt(idt, sizeof(idt));
 }
-
 //PAGEBREAK: 41
 void
 trap(struct trapframe *tf)
@@ -82,7 +82,6 @@ trap(struct trapframe *tf)
             cpuid(), tf->cs, tf->eip);
             lapiceoi();
             break;
-
         //PAGEBREAK: 13
         default:
         if(myproc() == 0 || (tf->cs&3) == 0){
@@ -98,17 +97,14 @@ trap(struct trapframe *tf)
         tf->err, cpuid(), tf->eip, rcr2());
         myproc()->killed = 1;
     }
-
     // Force process exit if it has been killed and is in user space.
     // (If it is still executing in the kernel, let it keep running
     // until it gets to the regular system call return.)
     if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
         exit();
-
     // Force process to give up CPU on clock tick.
     // If interrupts were on while locks held, would need to check nlock.
-    if(myproc() && myproc()->state == RUNNING &&
-    tf->trapno == T_IRQ0+IRQ_TIMER){
+    if(myproc() && myproc()->state == RUNNING && tf->trapno == T_IRQ0+IRQ_TIMER){
         struct proc *p = myproc();
         // Increment boosting_ticks, p->quantum, p->allotment when timer interrupt occurs
         // Only when mlfq_mode 1
@@ -123,8 +119,10 @@ trap(struct trapframe *tf)
             p->quantum = 0;
             yield();
         }
-        if(p->mlfq_mode==1 && p->prior_level==1 && p->quantum>=2)
+        if(p->mlfq_mode==1 && p->prior_level==1 && p->quantum>=2){
+            p->quantum = 0;
             yield();
+        }
         if(p->mlfq_mode==1 && p->prior_level==2 && p->quantum>=4){
             p->quantum = 0;
             yield();
@@ -132,7 +130,6 @@ trap(struct trapframe *tf)
         if(p->mlfq_mode==0)
             yield();
     }
-
     // Check if the process has been killed since we yielded
     if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
         exit();

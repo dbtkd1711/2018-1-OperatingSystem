@@ -121,3 +121,64 @@ sys_set_cpu_share(void)
 
     return set_cpu_share(n);
 }
+
+int
+sys_thread_create(void)
+{
+    thread_t * thread;
+    void * (*start_routine)(void*);
+    void * arg;
+    int n;
+
+    if(argint(0, &n) < 0)
+        return -1;
+
+    thread = (thread_t*)n;
+
+    if(argint(1, &n) < 0)
+        return -1;
+
+    start_routine = (void*)n;
+
+    if(argint(2, &n) < 0)
+        return -1;
+
+    arg = (void*)n;
+
+    return thread_create(thread, start_routine, arg);
+}
+
+int
+sys_thread_exit(void)
+{
+    int n;
+    void * ret_val;
+
+    if(argint(0, &n) < 0)
+        return -1;
+
+    ret_val = (void*)n;
+    thread_exit(ret_val);
+
+    return 0;
+}
+
+int
+sys_thread_join(void)
+{
+    thread_t thread;
+    int n;
+    void ** ret_val;
+
+    if(argint(0, &n) < 0)
+        return -1;
+
+    thread = (thread_t)n;
+
+    if(argint(1, &n) < 0)
+        return -1;
+
+    ret_val = (void**)n;
+
+    return thread_join(thread, ret_val);
+}

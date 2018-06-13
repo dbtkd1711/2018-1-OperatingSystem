@@ -16,13 +16,13 @@ static struct proc *initproc;
 
 int nextpid = 1;
 uint boosting_ticks = 0;
-int MLFQ_tickets = 100;  // Tickets for MLFQ = MLFQ's cpu shares
-int stride_tickets = 0;  // Sum of all stride mode processes' tickets = strides' cpu shares
+double MLFQ_tickets = 100;  // Tickets for MLFQ = MLFQ's cpu shares
+double stride_tickets = 0;  // Sum of all stride mode processes' tickets = strides' cpu shares
 
-int MLFQ_stride = 0;
+double MLFQ_stride = 0;
 
-int MLFQ_pass = 0;
-int stride_pass = 0;
+double MLFQ_pass = 0;
+double stride_pass = 0;
 
 extern void forkret(void);
 extern void trapret(void);
@@ -89,8 +89,7 @@ allocproc(void)
 
     // Reset all processes' pass as 0
     for(p=ptable.proc ; p<&ptable.proc[NPROC] ; p++)
-        if(p->mlfq_mode == 0)
-            p->pass = 0;
+        p->pass = 0;
 
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
         if(p->state == UNUSED)
@@ -102,14 +101,19 @@ allocproc(void)
 found:
     p->state = EMBRYO;
     p->pid = nextpid++;
+    p->mthread = p;
     // Initialize p as highest prioriy mlfq mode process
     p->mlfq_mode = 1;
     p->prior_level = 0;
     p->quantum = 0;
     p->allotment = 0;
+    p->total_tickets = 0;
     p->tickets = 0;
     p->stride = 0;
     p->pass = 0;
+    p->is_thread = 0;
+    p->tid = 0;
+    p->num_thread = 0;
 
     release(&ptable.lock);
 
@@ -169,17 +173,7 @@ userinit(void)
     // writes to be visible, and the lock is also needed
     // because the assignment might not be atomic.
     acquire(&ptable.lock);
-
-    // Initialize p as highest prioriy mlfq mode process
-    p->mlfq_mode = 1;
-    p->prior_level = 0;
-    p->quantum = 0;
-    p->allotment = 0;
-    p->tickets = 0;
-    p->stride = 0;
-    p->pass = 0;
     p->state = RUNNABLE;
-
     release(&ptable.lock);
 }
 
@@ -189,6 +183,7 @@ int
 growproc(int n)
 {
     uint sz;
+    struct proc *p;
     struct proc *curproc = myproc();
 
     sz = curproc->sz;
@@ -199,7 +194,14 @@ growproc(int n)
         if((sz = deallocuvm(curproc->pgdir, sz, sz + n)) == 0)
         return -1;
     }
-    curproc->sz = sz;
+
+    // All mthread and wthreads which share pid should point same sz
+    acquire(&ptable.lock);
+    for(p=ptable.proc ; p<&ptable.proc[NPROC] ; p++)
+        if(p->pid == curproc->pid)
+            p->sz = sz;
+    release(&ptable.lock);
+
     switchuvm(curproc);
     return 0;
 }
@@ -227,6 +229,7 @@ fork(void)
         return -1;
     }
     np->sz = curproc->sz;
+    np->usz = curproc->usz;
     np->parent = curproc;
     *np->tf = *curproc->tf;
 
@@ -234,8 +237,8 @@ fork(void)
     np->tf->eax = 0;
 
     for(i = 0; i < NOFILE; i++)
-    if(curproc->ofile[i])
-    np->ofile[i] = filedup(curproc->ofile[i]);
+        if(curproc->ofile[i])
+            np->ofile[i] = filedup(curproc->ofile[i]);
     np->cwd = idup(curproc->cwd);
 
     safestrcpy(np->name, curproc->name, sizeof(curproc->name));
@@ -262,47 +265,54 @@ exit(void)
     int fd;
 
     if(curproc == initproc)
-    panic("init exiting");
+        panic("init exiting");
 
-    // Close all open files.
-    for(fd = 0; fd < NOFILE; fd++){
-        if(curproc->ofile[fd]){
-            fileclose(curproc->ofile[fd]);
-            curproc->ofile[fd] = 0;
+    // Close all open files of mthread and wthreads
+    for(p=ptable.proc ; p<&ptable.proc[NPROC] ; p++){
+        if(p->pid == curproc->pid){
+            for(fd = 0; fd < NOFILE; fd++){
+                if(p->ofile[fd]){
+                    fileclose(p->ofile[fd]);
+                    p->ofile[fd] = 0;
+                }
+            }
+            begin_op();
+            iput(p->cwd);
+            end_op();
+            p->cwd = 0;
         }
     }
-
-    begin_op();
-    iput(curproc->cwd);
-    end_op();
-    curproc->cwd = 0;
 
     acquire(&ptable.lock);
 
     // Parent might be sleeping in wait().
     wakeup1(curproc->parent);
 
-    // Pass abandoned children to init.
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    for(p=ptable.proc; p<&ptable.proc[NPROC]; p++){
+        if(p->pid==curproc->pid && p->state!=UNUSED)
+            p->state = ZOMBIE;
+
+        // Child which is mthread
         if(p->parent == curproc){
             p->parent = initproc;
-            if(p->state == ZOMBIE)
-            wakeup1(initproc);
+            if(p->state == ZOMBIE){
+                wakeup1(initproc);
+            }
         }
     }
 
     // Adjust the tickets and MLFQ_stride in exit
-    MLFQ_tickets += curproc->tickets;
-    stride_tickets -= curproc->tickets;
-    MLFQ_stride = 10000 / MLFQ_tickets;
+    MLFQ_tickets += curproc->total_tickets;
+    stride_tickets -= curproc->total_tickets;
+    MLFQ_stride = (double)100 / MLFQ_tickets;
 
     // Jump into the scheduler, never to return.
-    curproc->state = ZOMBIE;
     sched();
     panic("zombie exit");
 }
 
 // Wait for a child process to exit and return its pid.
+// Clean up all wthreads whose parent is curproc
 // Return -1 if this process has no children.
 int
 wait(void)
@@ -311,13 +321,30 @@ wait(void)
     int havekids, pid;
     struct proc *curproc = myproc();
 
+
     acquire(&ptable.lock);
     for(;;){
         // Scan through table looking for exited children.
         havekids = 0;
+        // Clean up all zombie(exit or thread_exit made it zombie) wthreads
         for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-            if(p->parent != curproc)
-            continue;
+            if(p->parent==curproc && p->is_thread && p->state==ZOMBIE){
+                kfree(p->kstack);
+                p->kstack = 0;
+
+                p->pid = 0;
+                p->parent = 0;
+                p->name[0] = 0;
+                p->killed = 0;
+                p->is_thread = 0;
+                tid_alloc[p->tid-1] = 0;
+                p->tid = 0;
+                p->state = UNUSED;
+            }
+        }
+        for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+            if(p->is_thread || p->parent!=curproc)
+                continue;
             havekids = 1;
             if(p->state == ZOMBIE){
                 // Found one.
@@ -325,6 +352,7 @@ wait(void)
                 kfree(p->kstack);
                 p->kstack = 0;
                 freevm(p->pgdir);
+
                 p->pid = 0;
                 p->parent = 0;
                 p->name[0] = 0;
@@ -366,7 +394,7 @@ stride_scheduler(void)
 
     c->proc = 0;
 
-    int min_pass =  2147438647; // Maximum value of int
+    double min_pass =  10000000000;
     int min_pass_idx = 0;  // Index for process which has min pass
 
     // Find the process which has minimum pass value
@@ -497,6 +525,7 @@ MLFQ_scheduler(void)
         switchuvm(p);
         if(MLFQ_tickets!=100)
             MLFQ_pass += 4 * MLFQ_stride;
+
         p->state = RUNNING;
 
         swtch(&(c->scheduler), p->context);
@@ -573,6 +602,8 @@ yield(void)
 
 int
 set_cpu_share(int n){
+    struct proc * p;
+    struct proc * curproc = myproc();
 
     // If stride's cpu share exceeds 80 -> reject
     if(MLFQ_tickets-n < 20)
@@ -580,24 +611,30 @@ set_cpu_share(int n){
 
     // Adjust some values of process
     // also global tickets and stride
-    myproc()->mlfq_mode = 0;
-    myproc()->prior_level = -1;
-    myproc()->tickets = n;
-    myproc()->stride = 10000/n;
+    acquire(&ptable.lock);
+    for(p=ptable.proc ; p<&ptable.proc[NPROC] ; p++){
+        if(p->pid == curproc->pid){
+            p->mlfq_mode = 0;
+            p->prior_level = -1;
+            p->total_tickets = (double)n;
+            p->tickets = (double)n/(double)(curproc->mthread->num_thread+1);
+            p->stride = (double)100/p->tickets;
+        }
+    }
 
     MLFQ_tickets -= n;
     stride_tickets += n;
 
-    MLFQ_stride = 10000/MLFQ_tickets;
+    MLFQ_stride = (double)100/MLFQ_tickets;
 
     MLFQ_pass = 0;
     stride_pass = 0;
 
     // Initialize all processes' pass as 0
-    struct proc *p;
-    acquire(&ptable.lock);
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-        p->pass = 0;
+        if(p->mlfq_mode == 0)
+            p->pass = 0;
+
     release(&ptable.lock);
 
     return 0;
@@ -742,5 +779,188 @@ procdump(void)
             cprintf(" %p", pc[i]);
         }
         cprintf("\n");
+    }
+}
+
+int
+thread_create(thread_t * thread, void * (* start_routine)(void *), void * arg)
+{
+    struct proc * np;
+    struct proc * p;
+    struct proc * curproc = myproc();
+    uint sz, sp, ustack[2];
+
+    if((np=allocproc()) == 0)
+        return -1;
+
+    // Duplicate mthread's ofile, cwd, name
+    for(int i=0 ; i<NOFILE ; i++)
+        if(curproc->ofile[i])
+            np->ofile[i] = filedup(curproc->ofile[i]);
+
+    np->cwd = idup(curproc->cwd);
+
+    safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+
+    np->sz = curproc->sz;
+    np->pgdir = curproc->pgdir;
+    np->pid = curproc->pid;
+    np->parent = curproc->parent;
+    // If wthread call thread_create()
+    // -> it is same as mthread calls thread_create()
+    // -> np's mthread will be wthread's mthread
+    if(curproc->is_thread)
+        np->mthread = curproc->mthread;
+    else
+        np->mthread = curproc;
+    np->mthread->num_thread++;
+    *np->tf = *curproc->tf;
+    np->is_thread = 1;
+
+    // Allocate available tid by searching tid_alloc[]
+    for(int i=0 ; i<NPROC ; i++){
+        if(tid_alloc[i] == 0){
+            np->tid = i+1;
+            tid_alloc[i] = 1;
+            break;
+        }
+    }
+
+    *thread = np->tid;
+
+    // Set its sz and usz. Only ustack[2] is needed for start_routine's argument
+    sz = curproc->usz + (uint)(2*PGSIZE*(np->tid));
+    sp = sz;
+    np->usz = sz;
+
+    ustack[0] = 0xFFFFFFFF;
+    ustack[1] = (uint)arg;
+
+    sp -= 8;
+    if(copyout(np->pgdir, sp, ustack, 8) < 0)
+        return -1;
+
+    // Set eip as an address of start_routine()
+    np->tf->eip = (uint)start_routine;
+    np->tf->esp = sp;
+
+    // Reallocate total_tickets, tickets and stride
+    acquire(&ptable.lock);
+    if(curproc->total_tickets){
+        for(p=ptable.proc ; p<&ptable.proc[NPROC] ; p++){
+            if(p->pid == curproc->pid){
+                p->mlfq_mode = 0;
+                p->prior_level = -1;
+                p->total_tickets = curproc->total_tickets;
+                p->tickets = curproc->total_tickets / (double)(curproc->num_thread+1);
+                p->stride = (double)100 / p->tickets;
+            }
+        }
+        // Initialize all processes' pass as 0
+        // because new stride mode LWP is created
+        for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+            p->pass = 0;
+
+        MLFQ_pass = 0;
+        stride_pass = 0;
+    }
+    np->state = RUNNABLE;
+    release(&ptable.lock);
+
+    return 0;
+}
+
+void
+thread_exit(void * ret_val)
+{
+    struct proc * p;
+    struct proc * curproc = myproc();
+    int fd;
+
+    if(!curproc->is_thread)
+        panic("mthread cannot call thread_exit()");
+
+    // Close ofile of wthread
+    for(fd=0 ; fd<NOFILE ; fd++){
+        if(curproc->ofile[fd]){
+            fileclose(curproc->ofile[fd]);
+            curproc->ofile[fd] = 0;
+        }
+    }
+    begin_op();
+    iput(curproc->cwd);
+    end_op();
+    curproc->cwd = 0;
+
+    // Store ret_val to wthread->ret_val
+    // It will be read in thread_join later
+    curproc->ret_val = (int)ret_val;
+
+    acquire(&ptable.lock);
+    // Wake mthread to clean wthread's resources
+    wakeup1(curproc->mthread);
+
+    curproc->mthread->num_thread--;
+    // Reallocate total_tickets, tickets and stride
+    for(p=ptable.proc ; p<&ptable.proc[NPROC] ; p++){
+        if(curproc->total_tickets){
+            for(p=ptable.proc ; p<&ptable.proc[NPROC] ; p++){
+                if(p->pid==curproc->pid && p->tid!=curproc->tid){
+                    p->tickets = curproc->total_tickets / (double)(curproc->mthread->num_thread+1);
+                    p->stride = (double)100 / p->tickets;
+                }
+            }
+        }
+    }
+
+    curproc->state = ZOMBIE;
+
+    sched();
+    panic("zombie exit");
+}
+
+int
+thread_join(thread_t thread, void ** retval)
+{
+    struct proc * p;
+    struct proc * curproc = myproc();
+
+    if(curproc->is_thread)
+        panic("wthread cannot call thread_join()");
+
+    acquire(&ptable.lock);
+    for(;;){
+        for(p=ptable.proc ; p<&ptable.proc[NPROC] ; p++){
+            // Skip mthreads / wthreads which doesn't have thread as tid
+            if(!p->is_thread || p->tid!=thread)
+                continue;
+
+            if(p->state == ZOMBIE){
+                * retval = (void*)p->ret_val;
+
+                kfree(p->kstack);
+                p->kstack = 0;
+
+                p->pid = 0;
+                p->parent = 0;
+                p->name[0] = 0;
+                p->killed = 0;
+                p->is_thread = 0;
+                // Return its tid
+                tid_alloc[p->tid-1] = 0;
+                p->tid = 0;
+                p->state = UNUSED;
+
+                release(&ptable.lock);
+                return 0;
+            }
+        }
+        if(curproc->killed){
+            release(&ptable.lock);
+            return -1;
+        }
+
+        // Wait for wthread to exit
+        sleep(curproc, &ptable.lock);
     }
 }
