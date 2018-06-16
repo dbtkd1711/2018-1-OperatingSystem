@@ -598,9 +598,6 @@ writei(struct inode *ip, char *src, uint off, uint n)
       return -1;
     return devsw[ip->major].write(ip, src, n);
   }
-
-  if(off > ip->size)
-    ip->size = off;
  
   if(off + n < off)
     return -1;
